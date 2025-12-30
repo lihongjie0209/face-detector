@@ -7,11 +7,6 @@ face_database/*.bmp
 # Vector database
 face_database/.vector_db/
 
-# Models (too large for git)
-models/*.pth
-models/*.onnx
-models/*.pt
-
 # Virtual environment
 .venv/
 venv/

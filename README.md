@@ -1,24 +1,15 @@
 # 实时人脸检测系统
 
-基于 InsightFace 和 OpenCV 的实时人脸检测项目，集成 **ChromaDB 向量数据库**和 **MiniFASNet 活体检测**，可以通过摄像头实时检测、识别人脸并防止照片/视频欺骗。
+基于 InsightFace 和 OpenCV 的实时人脸检测项目，可以通过摄像头实时检测人脸并显示相关信息。
 
 ## 功能特性
 
 - ✨ **实时检测**：使用摄像头进行实时人脸检测
-- 🎯 **高精度**：基于 InsightFace 的 buffalo_sc 模型，检测准确率高
-- 🔐 **活体检测**：集成 MiniFASNet 进行静默活体检测，防止照片/视频攻击
-- 💾 **向量数据库**：使用 ChromaDB 存储和检索人脸特征
-- 👤 **人脸识别**：自动识别已注册人脸并显示姓名
-- 📊 **详细信息**：显示人脸边界框、置信度、活体状态等信息
+- 🎯 **高精度**：基于 InsightFace 的 buffalo_l 模型，检测准确率高
+- 📊 **详细信息**：显示人脸边界框、置信度、年龄、性别等信息
 - 🔍 **关键点检测**：标记面部5个关键特征点（眼睛、鼻子、嘴角）
 - 💾 **图像保存**：支持保存当前检测结果
-- ⚡ **性能优化**：支持 CPU 和 GPU 运行，异步检测，跳帧处理
-
-## 显示效果
-
-- 🟢 **绿色框** - 活体且已识别（显示姓名 + 相似度）
-- 🟠 **橙色框** - 活体但未识别（显示 "Unknown"）
-- 🔴 **红色框** - 非活体检测（显示 "FAKE!"）
+- ⚡ **性能优化**：支持 CPU 和 GPU 运行
 
 ## 安装依赖
 
@@ -46,18 +37,7 @@ pip install -r requirements.txt
 
 ## 使用方法
 
-### 1. 添加人脸到数据库
-
-将人脸照片放入 `face_database` 文件夹：
-- 命名格式：`姓名.jpg`（例如：`张三.jpg`, `李四.png`）
-- 支持格式：jpg, jpeg, png, bmp
-- 每张图片只包含一张人脸效果最佳
-
-### 2. （可选）添加活体检测模型
-
-将预训练的 MiniFASNet 模型文件 `minifasnet.pth` 放入 `models` 文件夹。如果没有模型，系统会使用随机初始化（效果不佳，建议获取预训练模型）。
-
-### 3. 运行程序
+### 基本运行
 
 ```powershell
 python face_detector.py
@@ -72,18 +52,14 @@ python face_detector.py
 ### 显示信息说明
 
 程序会在视频中显示：
-- 🟢 **绿色边框**：活体且已识别（显示姓名和相似度）
-- 🟠 **橙色边框**：活体但未识别（显示 "Unknown"）
-- 🔴 **红色边框**：非活体（显示 "FAKE!"）
+- 🟢 **绿色边框**：检测到的人脸位置
 - 🔵 **蓝色圆点**：面部关键特征点（眼睛、鼻子、嘴角）
 - 📝 **文字信息**：
-  - Live/FAKE：活体检测状态和置信度
-  - 姓名：识别到的人脸姓名（仅活体）
-  - Det：检测置信度
+  - Confidence：检测置信度（0-1之间）
+  - Age：预测年龄
+  - Gender：性别（Male/Female）
   - Faces：当前帧检测到的人脸数量
-  - FPS：帧率
-  - DB：人脸库中的人数
-  - Liveness：活体检测状态（ON/OFF）
+  - FPS：大致帧率
 
 ## 自定义配置
 
@@ -91,42 +67,28 @@ python face_detector.py
 
 ```python
 detector = RealtimeFaceDetector(
-    camera_id=0,              # 摄像头ID，0为默认摄像头
-    det_size=(320, 320),      # 检测尺寸，越大越准确但速度越慢
-    skip_frames=3,            # 每3帧检测一次（约100ms）
-    face_db_path="./face_database",  # 人脸库路径
-    enable_liveness=True      # 是否启用活体检测
+    camera_id=0,        # 摄像头ID，0为默认摄像头，1为第二个摄像头
+    det_size=(640, 640) # 检测尺寸，越大越准确但速度越慢
 )
-```
-
-### 调整活体检测阈值
-
-在代码中修改 `liveness_threshold`：
-
-```python
-self.liveness_threshold = 0.7  # 默认0.7，越高越严格
 ```
 
 ### GPU 加速
 
-如果你有 NVIDIA GPU 并安装了 CUDA：
+如果你有 NVIDIA GPU 并安装了 CUDA，可以修改代码使用 GPU 加速：
 
-1. 安装 GPU 版本的依赖：
-```powershell
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-pip uninstall onnxruntime
-pip install onnxruntime-gpu
+```python
+# 在 face_detector.py 的 __init__ 方法中修改
+self.app = FaceAnalysis(
+    name='buffalo_l',
+    providers=['CUDAExecutionProvider']  # 使用 GPU
+)
 ```
 
-2. 修改代码使用 GPU：
-```python
-# InsightFace 使用 GPU
-self.app = FaceAnalysis(
-    name='buffalo_sc',
-    providers=['CUDAExecutionProvider']
-)
+需要先安装 GPU 版本的 onnxruntime：
 
-# MiniFASNet 会自动使用 CUDA（如果可用）
+```powershell
+pip uninstall onnxruntime
+pip install onnxruntime-gpu
 ```
 
 ## 常见问题
