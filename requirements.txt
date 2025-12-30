@@ -1,0 +1,5 @@
+insightface>=0.7.3
+opencv-contrib-python>=4.8.0
+onnxruntime>=1.17.0
+numpy>=1.26.0
+chromadb>=0.4.0

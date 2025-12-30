@@ -1,0 +1,36 @@
+# Face database images (privacy)
+face_database/*.png
+face_database/*.jpg
+face_database/*.jpeg
+face_database/*.bmp
+
+# Vector database
+face_database/.vector_db/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# InsightFace models cache
+.insightface/
+
+# Detection output
+face_detection_*.jpg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
