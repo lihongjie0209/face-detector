@@ -11,15 +11,45 @@ import threading
 import time
 import os
 import chromadb
+import torch
+import torch.nn.functional as F
 from pathlib import Path
 from queue import Queue
 from insightface.app import FaceAnalysis
 
 
+class MiniFASNet(torch.nn.Module):
+    """MiniFASNet 活体检测模型"""
+    
+    def __init__(self):
+        super(MiniFASNet, self).__init__()
+        self.conv1 = torch.nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1)
+        self.bn1 = torch.nn.BatchNorm2d(32)
+        self.conv2 = torch.nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.bn2 = torch.nn.BatchNorm2d(64)
+        self.conv3 = torch.nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
+        self.bn3 = torch.nn.BatchNorm2d(128)
+        self.conv4 = torch.nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)
+        self.bn4 = torch.nn.BatchNorm2d(128)
+        self.conv5 = torch.nn.Conv2d(128, 64, kernel_size=3, stride=2, padding=1)
+        self.bn5 = torch.nn.BatchNorm2d(64)
+        self.fc = torch.nn.Linear(64 * 20 * 20, 2)
+        
+    def forward(self, x):
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn4(self.conv4(x)))
+        x = F.relu(self.bn5(self.conv5(x)))
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
+
+
 class RealtimeFaceDetector:
     """实时人脸检测器类"""
     
-    def __init__(self, camera_id=0, det_size=(320, 320), skip_frames=10, face_db_path=None):
+    def __init__(self, camera_id=0, det_size=(320, 320), skip_frames=10, face_db_path=None, enable_liveness=True):
         """
         初始化人脸检测器
         
@@ -28,14 +58,23 @@ class RealtimeFaceDetector:
             det_size: 检测图像的尺寸，默认为(320, 320)，越小速度越快
             skip_frames: 跳帧检测，每N帧检测一次，默认为10（约100ms采样一次）
             face_db_path: 人脸库文件夹路径，存放已知人脸图片
+            enable_liveness: 是否启用活体检测
         """
         self.camera_id = camera_id
         self.det_size = det_size
         self.skip_frames = skip_frames
+        self.enable_liveness = enable_liveness
         
         # 人脸库相关
         self.face_db_path = face_db_path
         self.face_threshold = 0.4  # 人脸相似度阈值，越小越严格
+        self.liveness_threshold = 0.7  # 活体检测阈值
+        
+        # 初始化活体检测模型
+        self.liveness_model = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if enable_liveness:
+            self._init_liveness_model()
         
         # 初始化 ChromaDB 向量数据库
         self.chroma_client = None
@@ -72,6 +111,58 @@ class RealtimeFaceDetector:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
+    
+    def _init_liveness_model(self):
+        """初始化活体检测模型"""
+        print("正在初始化活体检测模型...")
+        self.liveness_model = MiniFASNet().to(self.device)
+        self.liveness_model.eval()
+        
+        # 尝试加载预训练权重（如果存在）
+        model_path = Path("./models/minifasnet.pth")
+        if model_path.exists():
+            try:
+                self.liveness_model.load_state_dict(torch.load(model_path, map_location=self.device))
+                print("已加载预训练活体检测模型")
+            except Exception as e:
+                print(f"警告: 无法加载预训练模型，使用随机初始化: {e}")
+        else:
+            print("警告: 未找到预训练模型，活体检测可能不准确")
+            print(f"请将模型文件放置在: {model_path}")
+    
+    def check_liveness(self, face_img):
+        """
+        检测人脸是否为活体
+        
+        Args:
+            face_img: 人脸区域图像 (BGR格式)
+            
+        Returns:
+            tuple: (is_live: bool, score: float)
+        """
+        if not self.enable_liveness or self.liveness_model is None:
+            return True, 1.0
+        
+        try:
+            # 预处理图像
+            img = cv2.resize(face_img, (80, 80))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = img.transpose(2, 0, 1)  # HWC -> CHW
+            img = img.astype(np.float32) / 255.0
+            img = torch.from_numpy(img).unsqueeze(0).to(self.device)
+            
+            # 推理
+            with torch.no_grad():
+                output = self.liveness_model(img)
+                prob = F.softmax(output, dim=1)
+                live_score = prob[0][1].item()  # 活体概率
+            
+            is_live = live_score > self.liveness_threshold
+            return is_live, live_score
+            
+        except Exception as e:
+            print(f"活体检测错误: {e}")
+            return True, 0.0  # 出错时默认为活体
     
     def _init_vector_db(self):
         """初始化 ChromaDB 向量数据库"""
@@ -218,30 +309,53 @@ class RealtimeFaceDetector:
         
         return None, similarity
         
-    def draw_face_info(self, img, face):
+    def draw_face_info(self, img, face, frame):
         """
         在图像上绘制人脸信息
         
         Args:
             img: 原始图像
             face: InsightFace 检测到的人脸对象
+            frame: 完整帧图像，用于提取人脸区域进行活体检测
         """
         # 获取边界框
         bbox = face.bbox.astype(int)
         x1, y1, x2, y2 = bbox
         
-        # 尝试识别人脸
+        # 确保边界框在图像范围内
+        h, w = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        
+        # 活体检测
+        is_live = True
+        live_score = 1.0
+        if self.enable_liveness and x2 > x1 and y2 > y1:
+            face_region = frame[y1:y2, x1:x2]
+            if face_region.size > 0:
+                is_live, live_score = self.check_liveness(face_region)
+        
+        # 只有活体才进行人脸识别
         recognized_name = None
         similarity = 0
-        if hasattr(face, 'normed_embedding') and self.face_collection:
+        if is_live and hasattr(face, 'normed_embedding') and self.face_collection:
             recognized_name, similarity = self.recognize_face(face.normed_embedding)
         
-        # 根据是否识别到人脸选择颜色
-        if recognized_name:
-            box_color = (0, 255, 0)  # 绿色 - 已识别
+        # 根据活体检测和识别结果选择颜色
+        if not is_live:
+            box_color = (0, 0, 255)  # 红色 - 非活体
+            label_bg_color = (0, 0, 200)
+        elif recognized_name:
+            box_color = (0, 255, 0)  # 绿色 - 活体且已识别
             label_bg_color = (0, 200, 0)
         else:
-            box_color = (0, 165, 255)  # 橙色 - 未识别
+            box_color = (0, 165, 255)  # 橙色 - 活体但未识别
+            label_bg_color = (0, 140, 200)
+        if recognized_name:
+            box_color = (0, 255, 0)  # 绿色 - 活体且已识别
+            label_bg_color = (0, 200, 0)
+        else:
+            box_color = (0, 165, 255)  # 橙色 - 活体但未识别
             label_bg_color = (0, 140, 200)
         
         # 绘制人脸框
@@ -259,11 +373,26 @@ class RealtimeFaceDetector:
         
         # 显示信息
         text_y = y1 - 10
-        if text_y < 60:
+        if text_y < 80:
             text_y = y2 + 25
         
-        # 如果识别到人脸，显示姓名
-        if recognized_name:
+        # 显示活体检测状态
+        if self.enable_liveness:
+            if not is_live:
+                liveness_text = f"FAKE! ({live_score:.2f})"
+                (text_w, text_h), _ = cv2.getTextSize(liveness_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+                cv2.rectangle(img, (x1, text_y - text_h - 10), (x1 + text_w + 10, text_y), (0, 0, 200), -1)
+                cv2.putText(img, liveness_text, (x1 + 5, text_y - 5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                text_y -= (text_h + 15)
+            else:
+                liveness_text = f"Live ({live_score:.2f})"
+                cv2.putText(img, liveness_text, (x1, text_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                text_y -= 25
+        
+        # 如果是活体且识别到人脸，显示姓名
+        if is_live and recognized_name:
             # 绘制姓名背景
             name_text = f"{recognized_name} ({similarity:.2f})"
             (text_w, text_h), _ = cv2.getTextSize(name_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
@@ -273,11 +402,11 @@ class RealtimeFaceDetector:
             cv2.putText(img, name_text, (x1 + 5, text_y - 5), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             text_y -= (text_h + 15)
-        else:
-            # 显示"未知"
+        elif is_live:
+            # 活体但未识别
             unknown_text = "Unknown"
             cv2.putText(img, unknown_text, (x1, text_y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
             text_y -= 25
             
         # 显示置信度
@@ -356,13 +485,14 @@ class RealtimeFaceDetector:
             
             # 绘制检测到的人脸信息
             for face in self.latest_faces:
-                self.draw_face_info(frame, face)
+                self.draw_face_info(frame, face, frame)
             
             # 显示统计信息
             db_count = self.face_collection.count() if self.face_collection else 0
-            info_text = f"Faces: {len(self.latest_faces)} | FPS: {fps_display} | DB: {db_count} persons"
+            liveness_status = "ON" if self.enable_liveness else "OFF"
+            info_text = f"Faces: {len(self.latest_faces)} | FPS: {fps_display} | DB: {db_count} | Liveness: {liveness_status}"
             cv2.putText(frame, info_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
             # 显示提示信息
             cv2.putText(frame, "Press 'q' to quit, 's' to save", (10, frame.shape[0] - 10), 
@@ -402,8 +532,9 @@ def main():
         detector = RealtimeFaceDetector(
             camera_id=0,  # 使用第一个摄像头
             det_size=(320, 320),  # 使用较小的检测尺寸，提升速度
-            skip_frames=5,  # 每3帧检测一次（约100ms采样）
-            face_db_path="./face_database"  # 人脸库路径
+            skip_frames=3,  # 每3帧检测一次（约100ms采样）
+            face_db_path="./face_database",  # 人脸库路径
+            enable_liveness=True  # 启用活体检测
         )
         
         # 运行检测
